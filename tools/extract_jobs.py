@@ -12,9 +12,10 @@ import time
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 
-# API key from settings (fallback to .env)
-API_KEY = "fc-7070e7e7c3bf4862a77dd61cbdf2297e"
+load_dotenv(Path(__file__).parent.parent / ".env")
+API_KEY = os.environ["FIRECRAWL_API_KEY"]
 BASE_URL = "https://api.firecrawl.dev/v1"
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
