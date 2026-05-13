@@ -1,17 +1,20 @@
 """
 Scrape and parse AI Automation job listings from OnlineJobs.ph.
-Scrapes all result pages via Firecrawl, parses markdown, deduplicates,
+Scrapes paginated results via Firecrawl, parses markdown, deduplicates,
 and saves structured output to .tmp/ as both JSON and CSV.
 
 Usage:
-    python tools/parse_jobs.py
+    python tools/parse_jobs.py                        # all jobs
+    python tools/parse_jobs.py --from 2026-05-09 --to 2026-05-13   # date-filtered
 """
 
+import argparse
 import csv
 import json
 import os
 import re
 import time
+from datetime import date, datetime
 from pathlib import Path
 
 import requests
@@ -29,13 +32,11 @@ HEADERS = {
 SEARCH_BASE = "https://www.onlinejobs.ph/jobseekers/jobsearch"
 QUERY = "jobkeyword=AI+Automation&skill_tags=&gig=on&partTime=on&fullTime=on"
 PAGE_SIZE = 30
-TOTAL_PAGES = 10  # 299 jobs / 30 per page = 10 pages
+MAX_PAGES = 10
 
 EMPLOYMENT_TYPES = ["Full Time", "Part Time", "Gig", "Any"]
 
 OUTPUT_DIR = Path(__file__).parent.parent / ".tmp"
-OUTPUT_JSON = OUTPUT_DIR / "onlinejobs_ai_automation.json"
-OUTPUT_CSV = OUTPUT_DIR / "onlinejobs_ai_automation.csv"
 
 
 def page_url(page: int) -> str:
@@ -124,8 +125,13 @@ def parse_jobs_from_markdown(markdown: str) -> list[dict]:
     return jobs
 
 
+def job_date(job: dict) -> date:
+    return datetime.strptime(job["date_posted"][:10], "%Y-%m-%d").date()
+
+
 def save_csv(jobs: list[dict], path: Path) -> None:
     if not jobs:
+        print("  No jobs to save.")
         return
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=jobs[0].keys())
@@ -134,15 +140,32 @@ def save_csv(jobs: list[dict], path: Path) -> None:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--from", dest="date_from", help="Start date YYYY-MM-DD (inclusive)")
+    parser.add_argument("--to", dest="date_to", help="End date YYYY-MM-DD (inclusive)")
+    args = parser.parse_args()
+
+    date_from = datetime.strptime(args.date_from, "%Y-%m-%d").date() if args.date_from else None
+    date_to = datetime.strptime(args.date_to, "%Y-%m-%d").date() if args.date_to else None
+
+    if date_from or date_to:
+        label = f"{args.date_from or 'start'}_to_{args.date_to or 'end'}"
+        output_json = OUTPUT_DIR / f"onlinejobs_{label}.json"
+        output_csv = OUTPUT_DIR / f"onlinejobs_{label}.csv"
+        print(f"Date filter: {date_from} -> {date_to}")
+    else:
+        output_json = OUTPUT_DIR / "onlinejobs_ai_automation.json"
+        output_csv = OUTPUT_DIR / "onlinejobs_ai_automation.csv"
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     all_jobs: list[dict] = []
     seen_urls: set[str] = set()
     page_counts: dict[str, int] = {}
 
-    for page in range(1, TOTAL_PAGES + 1):
+    for page in range(1, MAX_PAGES + 1):
         url = page_url(page)
-        print(f"\nScraping page {page}/{TOTAL_PAGES}: {url}")
+        print(f"\nScraping page {page}/{MAX_PAGES}: {url}")
         try:
             markdown = scrape_page(url)
         except Exception as e:
@@ -154,11 +177,30 @@ def main():
         for j in new_jobs:
             seen_urls.add(j["job_url"])
 
+        # Apply date filter
+        if date_from or date_to:
+            filtered = []
+            for j in new_jobs:
+                d = job_date(j)
+                if date_from and d < date_from:
+                    continue
+                if date_to and d > date_to:
+                    continue
+                filtered.append(j)
+            new_jobs = filtered
+
         page_counts[f"page_{page}"] = len(new_jobs)
         all_jobs.extend(new_jobs)
-        print(f"  Parsed: {len(jobs)} | New (deduped): {len(new_jobs)} | Running total: {len(all_jobs)}")
+        print(f"  Parsed: {len(jobs)} | In range: {len(new_jobs)} | Running total: {len(all_jobs)}")
 
-        if page < TOTAL_PAGES:
+        # Stop early if every job on this page is already older than date_from
+        if date_from and jobs:
+            newest_on_page = max(job_date(j) for j in jobs)
+            if newest_on_page < date_from:
+                print(f"  All jobs on this page are before {date_from} — stopping early.")
+                break
+
+        if page < MAX_PAGES:
             time.sleep(1)
 
     # Save JSON
@@ -166,21 +208,20 @@ def main():
         "meta": {
             "total_jobs": len(all_jobs),
             "page_counts": page_counts,
-            "pages_scraped": TOTAL_PAGES,
+            "date_filter": {"from": str(date_from), "to": str(date_to)},
         },
         "jobs": all_jobs,
     }
-    OUTPUT_JSON.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\nJSON saved -> {OUTPUT_JSON}")
+    output_json.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\nJSON saved -> {output_json}")
 
-    # Save CSV
-    save_csv(all_jobs, OUTPUT_CSV)
-    print(f"CSV saved  -> {OUTPUT_CSV}")
+    save_csv(all_jobs, output_csv)
+    print(f"CSV saved  -> {output_csv}")
 
     print(f"\n--- SUMMARY ---")
     for page_key, count in page_counts.items():
-        print(f"  {page_key}: {count} new jobs")
-    print(f"  Total unique jobs: {len(all_jobs)}")
+        print(f"  {page_key}: {count} jobs in range")
+    print(f"  Total: {len(all_jobs)} jobs")
 
 
 if __name__ == "__main__":
